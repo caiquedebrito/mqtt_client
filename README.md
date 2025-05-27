@@ -1,4 +1,4 @@
-** Objetivo:
+Objetivo:
 
 - O Raspberry Pi Pico W deve se conectar a um servidor MQTT (também conhecido como broker) para enviar e receber mensagens. 
 
