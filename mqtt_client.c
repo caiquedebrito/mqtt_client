@@ -258,7 +258,6 @@ void set_servo_position(uint pin, uint pulse_width);
 void play_tone(uint pin, uint frequency, uint duration_ms);
 int read_dht11(DHT11 *dht);
 bool repeating_timer_callback(struct repeating_timer *t);
-static void simulate_dht11();
 
 int main(void) {
 
@@ -367,8 +366,7 @@ int main(void) {
 
     add_repeating_timer_ms(10000, repeating_timer_callback, NULL, &timer); // Lê o DHT11 a cada 5 segundos
 
-    // read_dht11(&dht11); // Lê o sensor DHT11
-    simulate_dht11(); // Simula a leitura do DHT11
+    read_dht11(&dht11); // Lê o sensor DHT11
 
     show_ip_address();
 
@@ -376,8 +374,7 @@ int main(void) {
     while (!state.connect_done || mqtt_client_is_connected(state.mqtt_client_inst)) {
         if (read_sensor_dht11) {
             read_sensor_dht11 = false; // Reseta a variável
-            // read_dht11(&dht11);  // Lê os dados do sensor DHT11
-            simulate_dht11(); // Simula a leitura do DHT11
+            read_dht11(&dht11);  // Lê os dados do sensor DHT11
             show_ip_address();
         }
 
@@ -445,8 +442,6 @@ static void publish_temperature(MQTT_CLIENT_DATA_T *state) {
     const char *temperature_key = full_topic(state, "/temperatura");
     const char *humidity_key = full_topic(state, "/umidade");
 
-    printf("Temperatura: %.2f, Umidade: %.2f\n", dht11.temperature, dht11.humidity);
-
     // Publica a temperatura e umidade no tópico MQTT
     char temp_str[16];
     snprintf(temp_str, sizeof(temp_str), "%.2f", dht11.temperature);
@@ -456,18 +451,6 @@ static void publish_temperature(MQTT_CLIENT_DATA_T *state) {
     snprintf(hum_str, sizeof(hum_str), "%.2f", dht11.humidity);
     INFO_printf("Publishing %s to %s\n", hum_str, humidity_key);
     mqtt_publish(state->mqtt_client_inst, humidity_key, hum_str, strlen(hum_str), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
-    // static float old_temperature;
-    // const char *temperature_key = full_topic(state, "/temperature");
-    // float temperature = read_onboard_temperature(TEMPERATURE_UNITS);
-
-    // if (temperature != old_temperature) {
-    //     old_temperature = temperature;
-    //     // Publish temperature on /temperature topic
-    //     char temp_str[16];
-    //     snprintf(temp_str, sizeof(temp_str), "%.2f", temperature);
-    //     INFO_printf("Publishing %s to %s\n", temp_str, temperature_key);
-    //     mqtt_publish(state->mqtt_client_inst, temperature_key, temp_str, strlen(temp_str), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
-    // }
 }
 
 // Requisição de Assinatura - subscribe
@@ -496,27 +479,12 @@ static void unsub_request_cb(void *arg, err_t err) {
 
 // Tópicos de assinatura
 static void sub_unsub_topics(MQTT_CLIENT_DATA_T* state, bool sub) {
-    // mqtt_request_cb_t cb = sub ? sub_request_cb : unsub_request_cb;
-    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/led"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/print"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/ping"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/exit"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/sala"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/cozinha"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/quarto"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-
     mqtt_request_cb_t cb = sub ? sub_request_cb : unsub_request_cb;
     const char *lista[] = { "/sala", "/cozinha", "/quarto", "/portao", "/alerta" };
- // há um limite de 5 tópicos
+
     for (int i = 0; i < 5; i++) {
         const char *t = lista[i];
         const char *topo = full_topic(state, t);
-
-         printf("[DEBUG] sub_unsub_topics() chamado. state=%p, mqtt_client_inst=%p\n",
-               state, state->mqtt_client_inst);
-        printf("[DEBUG] → Tentando %s tópico \"%s\" (len=%zu)\n",
-               sub ? "SUBSCRIBE" : "UNSUBSCRIBE",
-               topo, strlen(topo));
 
         int err = mqtt_sub_unsub(
             state->mqtt_client_inst,
@@ -526,10 +494,6 @@ static void sub_unsub_topics(MQTT_CLIENT_DATA_T* state, bool sub) {
             state,
             sub
         );
-        printf("[DEBUG] %s em tópico \"%s\" → retorno: %d\n",
-               sub ? "Subscribe" : "Unsubscribe",
-               topo,
-               err);
     }
 }
 
@@ -573,9 +537,7 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
             gate(false);
         }
     } else if (strcmp(basic_topic, "/alerta") == 0) {
-        // if (lwip_stricmp((const char *)state->data, "On") == 0 || strcmp((const char *)state->data, "1") == 0) {
-            emit_alert();
-        // }
+        emit_alert();
     } else if (strcmp(basic_topic, "/exit") == 0) {
         state->stop_client = true;
         sub_unsub_topics(state, false); // unsubscribe
@@ -774,15 +736,6 @@ void play_tone(uint pin, uint frequency, uint duration_ms) {
 void set_servo_position(uint pin, uint pulse_width) {
     uint slice_num = pwm_gpio_to_slice_num(pin);
     pwm_set_gpio_level(pin, pulse_width); // Define o nível PWM
-}
-
-static void simulate_dht11() {
-    // Humidade entre 30% e 90%
-    dht11.humidity    = 30.0f + (rand()/(float)RAND_MAX) * 60.0f;
-    // Temperatura entre 15°C e 35°C
-    dht11.temperature = 15 + (rand()/(float)RAND_MAX) * 20.0f;
-    printf("Simulated Umidade: %.2f%%, Temperatura: %.2f°C\n",
-           dht11.humidity, dht11.temperature);
 }
 
 // Função para ler os dados do sensor DHT11
