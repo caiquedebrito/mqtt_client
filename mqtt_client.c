@@ -27,11 +27,11 @@
 
 #include "pico/bootrom.h"
 
-#define WIFI_SSID "Willian(gdv)18am"                  // Substitua pelo nome da sua rede Wi-Fi
-#define WIFI_PASSWORD "c4iqu3246"      // Substitua pela senha da sua rede Wi-Fi
-#define MQTT_SERVER "10.0.1.101"                // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
-#define MQTT_USERNAME "admin"     // Substitua pelo nome da host MQTT - Username
-#define MQTT_PASSWORD "admin"     // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
+#define WIFI_SSID ""                  // Substitua pelo nome da sua rede Wi-Fi
+#define WIFI_PASSWORD ""      // Substitua pela senha da sua rede Wi-Fi
+#define MQTT_SERVER ""                // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
+#define MQTT_USERNAME ""     // Substitua pelo nome da host MQTT - Username
+#define MQTT_PASSWORD ""     // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
 
 
 // Pinos dos componentes
