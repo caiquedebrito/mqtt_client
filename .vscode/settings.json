@@ -41,6 +41,8 @@
         "cyw43_arch.h": "c",
         "mqtt_priv.h": "c",
         "dns.h": "c",
-        "altcp_tls.h": "c"
+        "altcp_tls.h": "c",
+        "timer.h": "c",
+        "ws2812.pio.h": "c"
     }
 }

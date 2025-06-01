@@ -1,10 +1,3 @@
- /* AULA IoT - Ricardo Prates - 001 - Cliente MQTT - Publisher:/Temperatura; Subscribed:/led
- *
- * Material de suporte - 27/05/2025
- * 
- * Código adaptado de: https://github.com/raspberrypi/pico-examples/tree/master/pico_w/wifi/mqtt 
- */
-
 #include "pico/stdlib.h"            // Biblioteca da Raspberry Pi Pico para funções padrão (GPIO, temporização, etc.)
 #include "pico/cyw43_arch.h"        // Biblioteca para arquitetura Wi-Fi da Pico com CYW43
 #include "pico/unique_id.h"         // Biblioteca com recursos para trabalhar com os pinos GPIO do Raspberry Pi Pico
@@ -18,11 +11,85 @@
 #include "lwip/dns.h"               // Biblioteca que fornece funções e recursos suporte DNS:
 #include "lwip/altcp_tls.h"         // Biblioteca que fornece funções e recursos para conexões seguras usando TLS:
 
-#define WIFI_SSID "SEU_SSID"                  // Substitua pelo nome da sua rede Wi-Fi
-#define WIFI_PASSWORD "SEU_PASSORD_WIFI"      // Substitua pela senha da sua rede Wi-Fi
-#define MQTT_SERVER "SEU_HOST"                // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
-#define MQTT_USERNAME "SEU_USERNAME_MQTT"     // Substitua pelo nome da host MQTT - Username
-#define MQTT_PASSWORD "SEU_PASSWORD_MQTT"     // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
+#include <stdio.h>
+#include "pico/bootrom.h"
+#include "lwip/tcp.h"
+#include "pico/cyw43_arch.h"
+#include "hardware/pwm.h"
+#include "hardware/clocks.h"
+#include "hardware/i2c.h"
+#include "lib/ssd1306.h"
+#include "hardware/pio.h"
+#include "ws2812.pio.h"
+#include "hardware/timer.h" // Inclui a biblioteca para gerenciamento de temporizadores de hardware.
+
+#include <time.h>
+
+#include "pico/bootrom.h"
+
+#define WIFI_SSID "Willian(gdv)18am"                  // Substitua pelo nome da sua rede Wi-Fi
+#define WIFI_PASSWORD "c4iqu3246"      // Substitua pela senha da sua rede Wi-Fi
+#define MQTT_SERVER "10.0.1.101"                // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
+#define MQTT_USERNAME "admin"     // Substitua pelo nome da host MQTT - Username
+#define MQTT_PASSWORD "admin"     // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
+
+
+// Pinos dos componentes
+#define WS2812_PIN 7 // Pino do WS2812
+#define BUTTON_B_PIN 6 // Pino do botão B
+#define SERVO_PIN 8  // Definição do pino PWM para o servo
+#define DHT_PIN 9 // Pino do DHT11
+#define BUZZER_PIN 21
+
+#define PWM_FREQ 50   // Frequência de 50Hz (Período de 20ms)
+#define PWM_WRAP 20000 // Contagem total do PWM (20ms em microsegundos
+
+#define I2C_PORT i2c1
+#define I2C_SDA 14
+#define I2C_SCL 15 
+#define address 0x3C
+
+ssd1306_t ssd;
+
+/*
+    * Variável para armazenar o estado dos dispositivos
+    * do sistema de automação residencial.
+*/
+typedef struct {
+    bool gate;
+    bool living_room_light;
+    bool kitchen_light;
+    bool bedroom_light;
+} THINGS;
+
+enum THINGS_MATRIX_5X5_POSITION {
+    LIVING_ROOM_LIGHT = 14,
+    KITCHEN_LIGHT = 12,
+    BEDROOM_LIGHT = 10,
+};
+
+THINGS things = {false, false, false, false};
+
+typedef struct {
+    float temperature;
+    float humidity;
+} DHT11;
+
+DHT11 dht11 = {0, 0};
+
+bool read_sensor_dht11 = false; // Variável para controlar a leitura do sensor DHT11
+
+#define LED_COUNT 25
+
+struct pixel_t {
+  uint8_t R, G, B; // Três valores de 8-bits compõem um pixel.
+};
+typedef struct pixel_t pixel_t;
+typedef pixel_t npLED_t; // Mudança de nome de "struct pixel_t" para "npLED_t" por clareza.
+
+PIO np_pio;
+uint sm;
+npLED_t leds[LED_COUNT];
 
 // Definição da escala de temperatura
 #ifndef TEMPERATURE_UNITS
@@ -146,16 +213,81 @@ static void start_client(MQTT_CLIENT_DATA_T *state);
 // Call back com o resultado do DNS
 static void dns_found(const char *hostname, const ip_addr_t *ipaddr, void *arg);
 
+void gpio_irq_handler(uint gpio, uint32_t events)
+{
+    volatile static uint32_t last_time = 0;
+    volatile uint32_t current_time = to_ms_since_boot(get_absolute_time()); 
+
+    if (current_time - last_time < 400) { // Debounce de 400ms
+        return;
+    }
+
+    last_time = current_time;
+
+    if (gpio == BUTTON_B_PIN) {
+        reset_usb_boot(0, 0);
+        return;
+    }
+}
+
+void gpio_setup() {
+    gpio_init(BUTTON_B_PIN);
+    gpio_set_dir(BUTTON_B_PIN, GPIO_IN);
+    gpio_pull_up(BUTTON_B_PIN);
+    gpio_set_irq_enabled_with_callback(
+        BUTTON_B_PIN, 
+        GPIO_IRQ_EDGE_FALL,
+        true, 
+        &gpio_irq_handler
+    );
+}
+
+void i2c_setup();
+void show_ip_address();
+void pwm_init_buzzer(uint pin);
+void setup_pwm(uint pin);
+void npInit(uint pin);
+void npClear();
+void npSetLED(const uint index, const uint8_t r, const uint8_t g, const uint8_t b);
+void npWrite();
+void turn_on_light(bool *light, uint index);
+void turn_off_light(bool *light, uint index);
+void gate(bool state);
+void emit_alert();
+void set_servo_position(uint pin, uint pulse_width);
+void play_tone(uint pin, uint frequency, uint duration_ms);
+int read_dht11(DHT11 *dht);
+bool repeating_timer_callback(struct repeating_timer *t);
+static void simulate_dht11();
+
 int main(void) {
 
     // Inicializa todos os tipos de bibliotecas stdio padrão presentes que estão ligados ao binário.
     stdio_init_all();
     INFO_printf("mqtt client starting\n");
 
+    gpio_setup(); // Configura o GPIO para o botão B
+
+    i2c_setup();
+    pwm_init_buzzer(BUZZER_PIN);
+    setup_pwm(SERVO_PIN);
+
+    npInit(WS2812_PIN);
+    npClear();
+
+    ssd1306_init(&ssd, WIDTH, HEIGHT, false, address, I2C_PORT);
+    ssd1306_config(&ssd);
+    ssd1306_send_data(&ssd);
+    ssd1306_fill(&ssd, false);
+    ssd1306_send_data(&ssd);
+
+    gpio_init(DHT_PIN); // Inicializa o pino do DHT11
+    sleep_ms(2000); // Espera para o sensor DHT11 se estabilizar
+
     // Inicializa o conversor ADC
-    adc_init();
-    adc_set_temp_sensor_enabled(true);
-    adc_select_input(4);
+    // adc_init();
+    // adc_set_temp_sensor_enabled(true);
+    // adc_select_input(4);
 
     // Cria registro com os dados do cliente
     static MQTT_CLIENT_DATA_T state;
@@ -231,8 +363,24 @@ int main(void) {
         panic("dns request failed");
     }
 
+    struct repeating_timer timer;
+
+    add_repeating_timer_ms(10000, repeating_timer_callback, NULL, &timer); // Lê o DHT11 a cada 5 segundos
+
+    // read_dht11(&dht11); // Lê o sensor DHT11
+    simulate_dht11(); // Simula a leitura do DHT11
+
+    show_ip_address();
+
     // Loop condicionado a conexão mqtt
     while (!state.connect_done || mqtt_client_is_connected(state.mqtt_client_inst)) {
+        if (read_sensor_dht11) {
+            read_sensor_dht11 = false; // Reseta a variável
+            // read_dht11(&dht11);  // Lê os dados do sensor DHT11
+            simulate_dht11(); // Simula a leitura do DHT11
+            show_ip_address();
+        }
+
         cyw43_arch_poll();
         cyw43_arch_wait_for_work_until(make_timeout_time_ms(10000));
     }
@@ -293,17 +441,33 @@ static void control_led(MQTT_CLIENT_DATA_T *state, bool on) {
 
 // Publicar temperatura
 static void publish_temperature(MQTT_CLIENT_DATA_T *state) {
-    static float old_temperature;
-    const char *temperature_key = full_topic(state, "/temperature");
-    float temperature = read_onboard_temperature(TEMPERATURE_UNITS);
-    if (temperature != old_temperature) {
-        old_temperature = temperature;
-        // Publish temperature on /temperature topic
-        char temp_str[16];
-        snprintf(temp_str, sizeof(temp_str), "%.2f", temperature);
-        INFO_printf("Publishing %s to %s\n", temp_str, temperature_key);
-        mqtt_publish(state->mqtt_client_inst, temperature_key, temp_str, strlen(temp_str), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
-    }
+
+    const char *temperature_key = full_topic(state, "/temperatura");
+    const char *humidity_key = full_topic(state, "/umidade");
+
+    printf("Temperatura: %.2f, Umidade: %.2f\n", dht11.temperature, dht11.humidity);
+
+    // Publica a temperatura e umidade no tópico MQTT
+    char temp_str[16];
+    snprintf(temp_str, sizeof(temp_str), "%.2f", dht11.temperature);
+    INFO_printf("Publishing %s to %s\n", temp_str, temperature_key);
+    mqtt_publish(state->mqtt_client_inst, temperature_key, temp_str, strlen(temp_str), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
+    char hum_str[16];
+    snprintf(hum_str, sizeof(hum_str), "%.2f", dht11.humidity);
+    INFO_printf("Publishing %s to %s\n", hum_str, humidity_key);
+    mqtt_publish(state->mqtt_client_inst, humidity_key, hum_str, strlen(hum_str), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
+    // static float old_temperature;
+    // const char *temperature_key = full_topic(state, "/temperature");
+    // float temperature = read_onboard_temperature(TEMPERATURE_UNITS);
+
+    // if (temperature != old_temperature) {
+    //     old_temperature = temperature;
+    //     // Publish temperature on /temperature topic
+    //     char temp_str[16];
+    //     snprintf(temp_str, sizeof(temp_str), "%.2f", temperature);
+    //     INFO_printf("Publishing %s to %s\n", temp_str, temperature_key);
+    //     mqtt_publish(state->mqtt_client_inst, temperature_key, temp_str, strlen(temp_str), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
+    // }
 }
 
 // Requisição de Assinatura - subscribe
@@ -332,15 +496,46 @@ static void unsub_request_cb(void *arg, err_t err) {
 
 // Tópicos de assinatura
 static void sub_unsub_topics(MQTT_CLIENT_DATA_T* state, bool sub) {
+    // mqtt_request_cb_t cb = sub ? sub_request_cb : unsub_request_cb;
+    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/led"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/print"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/ping"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/exit"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/sala"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/cozinha"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    // mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/quarto"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+
     mqtt_request_cb_t cb = sub ? sub_request_cb : unsub_request_cb;
-    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/led"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/print"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/ping"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/exit"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    const char *lista[] = { "/sala", "/cozinha", "/quarto", "/portao", "/alerta" };
+ // há um limite de 5 tópicos
+    for (int i = 0; i < 5; i++) {
+        const char *t = lista[i];
+        const char *topo = full_topic(state, t);
+
+         printf("[DEBUG] sub_unsub_topics() chamado. state=%p, mqtt_client_inst=%p\n",
+               state, state->mqtt_client_inst);
+        printf("[DEBUG] → Tentando %s tópico \"%s\" (len=%zu)\n",
+               sub ? "SUBSCRIBE" : "UNSUBSCRIBE",
+               topo, strlen(topo));
+
+        int err = mqtt_sub_unsub(
+            state->mqtt_client_inst,
+            topo,
+            MQTT_SUBSCRIBE_QOS,
+            cb,
+            state,
+            sub
+        );
+        printf("[DEBUG] %s em tópico \"%s\" → retorno: %d\n",
+               sub ? "Subscribe" : "Unsubscribe",
+               topo,
+               err);
+    }
 }
 
 // Dados de entrada MQTT
 static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags) {
+    printf("mqtt_incoming_data_cb: flags %d, len %d\n", flags, len);
     MQTT_CLIENT_DATA_T* state = (MQTT_CLIENT_DATA_T*)arg;
 #if MQTT_UNIQUE_TOPIC
     const char *basic_topic = state->topic + strlen(state->mqtt_client_info.client_id) + 1;
@@ -351,21 +546,38 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
     state->len = len;
     state->data[len] = '\0';
 
+    printf("Received data on topic: %s\n", state->topic);
     DEBUG_printf("Topic: %s, Message: %s\n", state->topic, state->data);
-    if (strcmp(basic_topic, "/led") == 0)
-    {
-        if (lwip_stricmp((const char *)state->data, "On") == 0 || strcmp((const char *)state->data, "1") == 0)
-            control_led(state, true);
-        else if (lwip_stricmp((const char *)state->data, "Off") == 0 || strcmp((const char *)state->data, "0") == 0)
-            control_led(state, false);
-    } else if (strcmp(basic_topic, "/print") == 0) {
-        INFO_printf("%.*s\n", len, data);
-    } else if (strcmp(basic_topic, "/ping") == 0) {
-        char buf[11];
-        snprintf(buf, sizeof(buf), "%u", to_ms_since_boot(get_absolute_time()) / 1000);
-        mqtt_publish(state->mqtt_client_inst, full_topic(state, "/uptime"), buf, strlen(buf), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
+    if (strcmp(basic_topic, "/sala") == 0) {
+        if (lwip_stricmp((const char *)state->data, "On") == 0 || strcmp((const char *)state->data, "1") == 0) {
+            turn_on_light(&things.living_room_light, LIVING_ROOM_LIGHT);
+        } else if (lwip_stricmp((const char *)state->data, "Off") == 0 || strcmp((const char *)state->data, "0") == 0) {
+            turn_off_light(&things.living_room_light, LIVING_ROOM_LIGHT);
+        }
+    } else if (strcmp(basic_topic, "/cozinha") == 0) {
+        if (lwip_stricmp((const char *)state->data, "On") == 0 || strcmp((const char *)state->data, "1") == 0) {
+            turn_on_light(&things.kitchen_light, KITCHEN_LIGHT);
+        } else if (lwip_stricmp((const char *)state->data, "Off") == 0 || strcmp((const char *)state->data, "0") == 0) {
+            turn_off_light(&things.kitchen_light, KITCHEN_LIGHT);
+        }
+    } else if (strcmp(basic_topic, "/quarto") == 0) {
+        if (lwip_stricmp((const char *)state->data, "On") == 0 || strcmp((const char *)state->data, "1") == 0) {
+            turn_on_light(&things.bedroom_light, BEDROOM_LIGHT);
+        } else if (lwip_stricmp((const char *)state->data, "Off") == 0 || strcmp((const char *)state->data, "0") == 0) {
+            turn_off_light(&things.bedroom_light, BEDROOM_LIGHT);
+        }
+    } else if (strcmp(basic_topic, "/portao") == 0) {
+        if (lwip_stricmp((const char *)state->data, "Open") == 0 || strcmp((const char *)state->data, "1") == 0) {
+            gate(true);
+        } else if (lwip_stricmp((const char *)state->data, "Close") == 0 || strcmp((const char *)state->data, "0") == 0) {
+            gate(false);
+        }
+    } else if (strcmp(basic_topic, "/alerta") == 0) {
+        // if (lwip_stricmp((const char *)state->data, "On") == 0 || strcmp((const char *)state->data, "1") == 0) {
+            emit_alert();
+        // }
     } else if (strcmp(basic_topic, "/exit") == 0) {
-        state->stop_client = true; // stop the client when ALL subscriptions are stopped
+        state->stop_client = true;
         sub_unsub_topics(state, false); // unsubscribe
     }
 }
@@ -446,4 +658,220 @@ static void dns_found(const char *hostname, const ip_addr_t *ipaddr, void *arg) 
     } else {
         panic("dns request failed");
     }
+}
+
+/**
+ * Atribui uma cor RGB a um LED.
+ */
+void npSetLED(const uint index, const uint8_t r, const uint8_t g, const uint8_t b) {
+    leds[index].R = r;
+    leds[index].G = g;
+    leds[index].B = b;
+}
+ 
+void npClear() {
+    for (uint i = 0; i < LED_COUNT; ++i)
+        npSetLED(i, 0, 0, 0);
+}
+
+void npWrite() {
+    for (uint i = 0; i < LED_COUNT; ++i) {
+        pio_sm_put_blocking(np_pio, sm, leds[i].G);
+        pio_sm_put_blocking(np_pio, sm, leds[i].R);
+        pio_sm_put_blocking(np_pio, sm, leds[i].B);
+    }
+    sleep_us(100);
+}
+  
+void npInit(uint pin) {
+    // Cria programa PIO.
+    uint offset = pio_add_program(pio0, &ws2818b_program);
+    np_pio = pio0;
+
+    // Toma posse de uma máquina PIO.
+    sm = pio_claim_unused_sm(np_pio, false);
+    if (sm < 0) {
+        np_pio = pio1;
+        sm = pio_claim_unused_sm(np_pio, true); // Se nenhuma máquina estiver livre, panic!
+    }
+
+    // Inicia programa na máquina PIO obtida.
+    ws2818b_program_init(np_pio, sm, offset, pin, 800000.f);
+
+    npClear();
+    npWrite(); // Limpa os LEDs.
+}
+
+void turn_on_light(bool *light, uint index) {
+    *light = true;
+    if (index == LIVING_ROOM_LIGHT) {
+        npSetLED(index, 255, 0, 0); // Vermelho
+    } else if (index == KITCHEN_LIGHT) {
+        npSetLED(index, 0, 255, 0); // Verde
+    } else if (index == BEDROOM_LIGHT) {
+        npSetLED(index, 0, 0, 255); // Azul
+    }
+    npWrite();
+}
+
+void turn_off_light(bool *light, uint index) {
+    *light = false;
+    npSetLED(index, 0, 0, 0);
+    npWrite();
+}
+
+void gate(bool state) {
+    things.gate = state;
+
+    if (state) {
+        printf("Portão aberto\n");
+        set_servo_position(SERVO_PIN, 2400); // Abre o portão
+    } else {
+        printf("Portão fechado\n");
+        set_servo_position(SERVO_PIN, 500); // Fecha o portão
+    }
+}
+
+void emit_alert() {
+    printf("Alerta acionado\n");
+    play_tone(BUZZER_PIN, 392, 1000); // Toca um tom de alerta
+}
+
+void pwm_init_buzzer(uint pin) {
+    gpio_set_function(pin, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(pin);
+    pwm_config config = pwm_get_default_config();
+    pwm_config_set_clkdiv(&config, 4.0f); // Ajusta divisor de clock
+    pwm_init(slice_num, &config, true);
+    pwm_set_gpio_level(pin, 0); // Desliga o PWM inicialmente
+}
+
+// Função para configurar o PWM
+void setup_pwm(uint pin) {
+    gpio_set_function(pin, GPIO_FUNC_PWM); // Configura o pino como saída PWM
+    uint slice_num = pwm_gpio_to_slice_num(pin); // Obtém o número do slice PWM
+    pwm_set_wrap(slice_num, PWM_WRAP); // Define o período do PWM para 20ms
+    pwm_set_clkdiv(slice_num, 125.0f); // Configuração do divisor de clock para atingir 50Hz
+    pwm_set_enabled(slice_num, true); // Habilita o PWM
+}
+
+// Toca uma nota com a frequência e duração especificadas
+void play_tone(uint pin, uint frequency, uint duration_ms) {
+    uint slice_num = pwm_gpio_to_slice_num(pin);
+    uint32_t clock_freq = clock_get_hz(clk_sys);
+    uint32_t top = clock_freq / frequency - 1;
+
+    pwm_set_wrap(slice_num, top);
+    pwm_set_gpio_level(pin, top / 2); // 50% de duty cycle
+
+    sleep_ms(duration_ms);
+
+    pwm_set_gpio_level(pin, 0); // Desliga o som após a duração
+    sleep_ms(50); // Pausa entre notas
+}
+
+// Função para definir o ciclo ativo (duty cycle) do servo em microssegundos
+void set_servo_position(uint pin, uint pulse_width) {
+    uint slice_num = pwm_gpio_to_slice_num(pin);
+    pwm_set_gpio_level(pin, pulse_width); // Define o nível PWM
+}
+
+static void simulate_dht11() {
+    // Humidade entre 30% e 90%
+    dht11.humidity    = 30.0f + (rand()/(float)RAND_MAX) * 60.0f;
+    // Temperatura entre 15°C e 35°C
+    dht11.temperature = 15 + (rand()/(float)RAND_MAX) * 20.0f;
+    printf("Simulated Umidade: %.2f%%, Temperatura: %.2f°C\n",
+           dht11.humidity, dht11.temperature);
+}
+
+// Função para ler os dados do sensor DHT11
+int read_dht11(DHT11 *sensor) {
+    uint8_t data[5] = {0};
+
+    // Inicializa o pino como saída e envia o pulso de start
+    gpio_init(DHT_PIN);
+    gpio_set_dir(DHT_PIN, GPIO_OUT);
+    gpio_put(DHT_PIN, 0);
+    sleep_ms(20);  // Mantém por 20ms
+    gpio_put(DHT_PIN, 1);
+    sleep_us(40);  // Espera 40us
+
+    gpio_set_dir(DHT_PIN, GPIO_IN);
+
+    // Aguarda resposta do sensor (LOW por ~80us)
+    while (gpio_get(DHT_PIN) == 1);
+    while (gpio_get(DHT_PIN) == 0);
+    while (gpio_get(DHT_PIN) == 1);
+
+    // Lê os 40 bits
+    for (int i = 0; i < 40; i++) {
+        while (gpio_get(DHT_PIN) == 0); // Espera 50us de LOW
+
+        // Marca o tempo do pulso HIGH
+        uint32_t start_time = time_us_32();
+        while (gpio_get(DHT_PIN) == 1);
+        uint32_t pulse_duration = time_us_32() - start_time;
+
+        // Se o HIGH for maior que 40us, é 1, senão 0
+        data[i / 8] <<= 1;
+        if (pulse_duration > 40) {
+            data[i / 8] |= 1;
+        }
+    }
+
+    // Verifica checksum
+    uint8_t checksum = data[0] + data[1] + data[2] + data[3];
+    if (data[4] != checksum) return -1;
+
+    sensor->humidity = data[0];
+    sensor->temperature = data[2];
+
+    // Exibe os dados lidos
+    printf("Umidade: %d%%, Temperatura: %d°C\n", sensor->humidity, sensor->temperature);
+
+    return 0;
+}
+
+bool repeating_timer_callback(struct repeating_timer *t) {
+    read_sensor_dht11 = true; // Define a variável para ler o sensor DHT11
+    return true;
+}
+
+void i2c_setup() {
+    i2c_init(I2C_PORT, 400 * 1000);
+    gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA);
+    gpio_pull_up(I2C_SCL);
+}
+
+
+void show_ip_address() {
+    uint8_t *ip_address = (uint8_t*)&(cyw43_state.netif[0].ip_addr.addr);
+    printf("Endereço IP %d.%d.%d.%d\n", ip_address[0], ip_address[1], ip_address[2], ip_address[3]);
+
+    char ip_str_0[4];
+    char ip_str_1[4];
+    char ip_str_2[4];
+    char ip_str_3[4];
+    char temp_str[6];
+    char hum_str[6];
+    snprintf(temp_str, sizeof(temp_str), "%.2f°C", dht11.temperature);
+    snprintf(hum_str, sizeof(hum_str), "%.2f%%", dht11.humidity);
+    sprintf(ip_str_0, "%d.", ip_address[0]);
+    sprintf(ip_str_1, "%d.", ip_address[1]);
+    sprintf(ip_str_2, "%d.", ip_address[2]);
+    sprintf(ip_str_3, "%d", ip_address[3]);
+
+    ssd1306_draw_string(&ssd, "Temp: ", 3, 3);
+    ssd1306_draw_string(&ssd, temp_str, 56, 3);
+    ssd1306_draw_string(&ssd, "Umidade: ", 3, 13);
+    ssd1306_draw_string(&ssd, hum_str, 80, 13);
+
+    ssd1306_draw_string(&ssd, ip_str_0, 1, 30);
+    ssd1306_draw_string(&ssd, ip_str_1, 26, 30);
+    ssd1306_draw_string(&ssd, ip_str_2, 42, 30);
+    ssd1306_draw_string(&ssd, ip_str_3, 59, 30);
+    ssd1306_send_data(&ssd);
 }

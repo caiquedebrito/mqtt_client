@@ -35,7 +35,9 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(mqtt_client mqtt_client.c )
+add_executable(mqtt_client mqtt_client.c lib/ssd1306.c)
+
+pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/ws2812.pio)
 
 pico_set_program_name(mqtt_client "mqtt_client")
 pico_set_program_version(mqtt_client "0.1")
@@ -52,6 +54,10 @@ target_link_libraries(mqtt_client
     pico_lwip_mqtt
     pico_mbedtls
     pico_lwip_mbedtls
+    hardware_pwm           # PWM do RP2040
+    hardware_clocks         # Clock do RP2040
+    hardware_i2c           # I2C do RP2040
+    hardware_pio
     )
 
 # Add the standard include files to the build
